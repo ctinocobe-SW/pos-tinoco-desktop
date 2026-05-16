@@ -2,6 +2,8 @@ import { app, BrowserWindow, Menu, shell, ipcMain, net } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import * as path from 'path'
 import * as http from 'http'
+import { getDb, closeDb } from './db/sqlite'
+import { registerTicketHandlers } from './ipc/tickets'
 
 const PORT = 3000
 const IS_PACKAGED = app.isPackaged
@@ -127,9 +129,13 @@ function waitForServer(maxAttempts = 40): Promise<void> {
 ipcMain.handle('app:getVersion', () => app.getVersion())
 ipcMain.handle('app:isOnline', () => net.isOnline())
 ipcMain.handle('app:getPath', (_e, name: string) => app.getPath(name as Parameters<typeof app.getPath>[0]))
+registerTicketHandlers()
 
 // ── Ciclo de vida ─────────────────────────────────────────────────
 app.whenReady().then(async () => {
+  // Inicializar base de datos local
+  getDb()
+
   createSplash()
 
   try {
@@ -155,4 +161,5 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   if (nextServer) { nextServer.kill(); nextServer = null }
+  closeDb()
 })
