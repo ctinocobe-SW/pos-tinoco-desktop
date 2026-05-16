@@ -16,6 +16,7 @@ files:
   - "!node_modules/**/{test,tests,__tests__,spec}/**"
   - "!node_modules/**/*.{md,map}"
   - "package.json"
+  - ".env"
 
 # El proyecto Next.js se incluye como recurso extra
 extraResources:
@@ -35,7 +36,7 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  icon: "build-resources/icon.ico"
+  icon: "build-resources/icon.png"
 
 nsis:
   oneClick: false
@@ -46,11 +47,12 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: "El Mercader POS"
   runAfterFinish: true
+  installerHeaderIcon: "build-resources/icon.png"
 
 # ── macOS ─────────────────────────────────────────────────────────
 mac:
   target: dmg
-  icon: "build-resources/icon.icns"
+  icon: "build-resources/icon.png"
   category: "public.app-category.business"
 
 # ── Compresión ────────────────────────────────────────────────────

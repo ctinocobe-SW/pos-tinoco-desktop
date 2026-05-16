@@ -5,6 +5,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getVersion: (): Promise<string> => ipcRenderer.invoke('app:getVersion'),
   isOnline: (): Promise<boolean> => ipcRenderer.invoke('app:isOnline'),
   getPath: (name: string): Promise<string> => ipcRenderer.invoke('app:getPath', name),
+  isKiosk: (): Promise<boolean> => ipcRenderer.invoke('app:isKiosk'),
+
+  // Control de ventana (modo sin frame)
+  minimizeWindow: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
+  maximizeWindow: (): Promise<void> => ipcRenderer.invoke('window:maximize'),
+  closeWindow: (): Promise<void> => ipcRenderer.invoke('window:close'),
 
   // Tickets offline (Fase 1)
   createTicket: (payload: unknown): Promise<unknown> =>
