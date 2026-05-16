@@ -1,9 +1,13 @@
-import { app, BrowserWindow, Menu, shell, ipcMain, net } from 'electron'
-import { spawn, ChildProcess } from 'child_process'
+import * as dotenv from 'dotenv'
 import * as path from 'path'
 import * as http from 'http'
+import { spawn, ChildProcess } from 'child_process'
+import { app, BrowserWindow, Menu, shell, ipcMain, net } from 'electron'
+
+dotenv.config({ path: path.join(__dirname, '..', '.env') })
 import { getDb, closeDb } from './db/sqlite'
 import { registerTicketHandlers } from './ipc/tickets'
+import { startSyncEngine, stopSyncEngine, registerSyncHandlers } from './sync/engine'
 
 const PORT = 3000
 const IS_PACKAGED = app.isPackaged
@@ -130,11 +134,15 @@ ipcMain.handle('app:getVersion', () => app.getVersion())
 ipcMain.handle('app:isOnline', () => net.isOnline())
 ipcMain.handle('app:getPath', (_e, name: string) => app.getPath(name as Parameters<typeof app.getPath>[0]))
 registerTicketHandlers()
+registerSyncHandlers()
 
 // ── Ciclo de vida ─────────────────────────────────────────────────
 app.whenReady().then(async () => {
   // Inicializar base de datos local
   getDb()
+
+  // Arrancar motor de sincronización
+  startSyncEngine()
 
   createSplash()
 
@@ -160,6 +168,7 @@ app.on('activate', () => {
 })
 
 app.on('before-quit', () => {
+  stopSyncEngine()
   if (nextServer) { nextServer.kill(); nextServer = null }
   closeDb()
 })
