@@ -1,0 +1,60 @@
+appId: com.tinoco.pos.desktop
+productName: "El Mercader POS"
+copyright: "© 2025 Tinoco"
+
+main: "electron-dist/main.js"
+
+directories:
+  output: "dist"
+  buildResources: "build-resources"
+
+files:
+  - "electron-dist/**/*"
+  - "!electron-dist/**/*.map"
+  - "assets/**/*"
+  - "node_modules/**/*"
+  - "!node_modules/**/{test,tests,__tests__,spec}/**"
+  - "!node_modules/**/*.{md,map}"
+  - "package.json"
+
+# El proyecto Next.js se incluye como recurso extra
+extraResources:
+  - from: "../pos-tinoco"
+    to: "web"
+    filter:
+      - ".next/**/*"
+      - "public/**/*"
+      - "node_modules/**/*"
+      - "package.json"
+      - "next.config.js"
+      - "!node_modules/**/{test,tests,__tests__}/**"
+      - "!node_modules/**/*.{md,map}"
+
+# ── Windows ──────────────────────────────────────────────────────
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: "build-resources/icon.ico"
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: false
+  installerLanguages: ["es_MX", "en_US"]
+  language: "3082"
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: "El Mercader POS"
+  runAfterFinish: true
+
+# ── macOS ─────────────────────────────────────────────────────────
+mac:
+  target: dmg
+  icon: "build-resources/icon.icns"
+  category: "public.app-category.business"
+
+# ── Compresión ────────────────────────────────────────────────────
+compression: maximum
+asar: true
+asarUnpack:
+  - "node_modules/better-sqlite3/**"

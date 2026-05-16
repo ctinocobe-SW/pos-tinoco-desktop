@@ -1,0 +1,26 @@
+{
+  "name": "pos-tinoco-desktop",
+  "version": "1.0.0",
+  "description": "El Mercader del Bajío — POS Desktop (Electron)",
+  "private": true,
+  "main": "electron-dist/main.js",
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "dev": "concurrently -k -n \"NEXT,ELECTRON\" -c \"blue,green\" \"node scripts/start-next.js\" \"wait-on http://localhost:3000 && electron .\"",
+    "build": "npm run compile && electron-builder",
+    "build:win": "npm run compile && electron-builder --win",
+    "build:mac": "npm run compile && electron-builder --mac"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "concurrently": "^9.2.1",
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5",
+    "wait-on": "^9.0.1"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  }
+}
