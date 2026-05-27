@@ -2,8 +2,6 @@ appId: com.tinoco.pos.desktop
 productName: "El Mercader POS"
 copyright: "© 2025 Tinoco"
 
-main: "electron-dist/main.js"
-
 directories:
   output: "dist"
   buildResources: "build-resources"
@@ -41,8 +39,6 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: false
-  installerLanguages: ["es_MX", "en_US"]
-  language: "3082"
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: "El Mercader POS"
@@ -55,8 +51,20 @@ mac:
   icon: "build-resources/icon.png"
   category: "public.app-category.business"
 
+# node.exe standalone para correr Next.js en Windows
+extraFiles:
+  - from: "build-resources/node.exe"
+    to: "node.exe"
+    filter: ["**/*"]
+
 # ── Compresión ────────────────────────────────────────────────────
 compression: maximum
 asar: true
 asarUnpack:
   - "node_modules/better-sqlite3/**"
+
+# Auto-update via GitHub Releases
+publish:
+  provider: github
+  owner: ctinocobe-SW
+  repo: pos-tinoco-desktop

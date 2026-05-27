@@ -1,8 +1,10 @@
 import * as dotenv from 'dotenv'
 import * as path from 'path'
 import * as http from 'http'
+import * as fs from 'fs'
 import { spawn, ChildProcess } from 'child_process'
-import { app, BrowserWindow, Menu, shell, ipcMain, net, globalShortcut, session } from 'electron'
+import { app, BrowserWindow, Menu, shell, ipcMain, net, globalShortcut, dialog } from 'electron'
+import { autoUpdater } from 'electron-updater'
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') })
 
@@ -17,6 +19,23 @@ const KIOSK_MODE = process.env.KIOSK_MODE === 'true'
 let mainWindow: BrowserWindow | null = null
 let nextServer: ChildProcess | null = null
 let splashWindow: BrowserWindow | null = null
+
+// ── Logging a archivo ────────────────────────────────────────────
+const logDir = app.getPath('userData')
+const logFile = path.join(logDir, 'startup.log')
+
+function log(msg: string) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`
+  process.stdout.write(line)
+  try { fs.appendFileSync(logFile, line) } catch { /* ignore */ }
+}
+
+// ── Mostrar error en pantalla antes de salir ─────────────────────
+function fatalError(title: string, detail: string): void {
+  log(`FATAL: ${title} — ${detail}`)
+  dialog.showErrorBox(title, `${detail}\n\nLog: ${logFile}`)
+  app.quit()
+}
 
 // ── Auto-arranque al iniciar Windows ─────────────────────────────
 function setupAutoLaunch() {
@@ -52,26 +71,23 @@ function createMainWindow() {
     minHeight: 600,
     show: false,
     title: 'El Mercader del Bajío — POS',
-    // En modo kiosco: sin frame ni barra de título
     frame: !KIOSK_MODE,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      // Touch optimizations
       zoomFactor: KIOSK_MODE ? 1.15 : 1.0,
     },
   })
 
   Menu.setApplicationMenu(null)
 
-  // Bloquear atajos de teclado en modo kiosco
   if (KIOSK_MODE) {
     globalShortcut.registerAll(
       ['F12', 'CommandOrControl+R', 'CommandOrControl+Shift+R',
        'CommandOrControl+W', 'CommandOrControl+Q', 'Alt+F4'],
-      () => {} // no-op
+      () => {}
     )
   }
 
@@ -83,80 +99,189 @@ function createMainWindow() {
       splashWindow = null
     }
     mainWindow?.show()
-
-    if (IS_PACKAGED || KIOSK_MODE) {
-      mainWindow?.maximize()
-    }
+    if (IS_PACKAGED || KIOSK_MODE) mainWindow?.maximize()
   })
 
-  // Links externos abren en el navegador del sistema
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
   })
 
-  // En modo kiosco, evitar que el usuario cierre la ventana accidentalmente
   if (KIOSK_MODE) {
-    mainWindow.on('close', (e) => {
-      e.preventDefault()
-    })
+    mainWindow.on('close', (e) => { e.preventDefault() })
   }
 
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
-// ── Arrancar servidor Next.js (solo en producción) ───────────────
+// ── Arrancar servidor Next.js ────────────────────────────────────
+// En Windows dentro del asar, los .cmd de node_modules/.bin no funcionan.
+// Usamos `node` directamente apuntando al script de Next.js.
 function startNextServer(): Promise<void> {
   return new Promise((resolve, reject) => {
     const appPath = IS_PACKAGED
       ? path.join(process.resourcesPath, 'web')
       : path.join(__dirname, '..', '..', 'pos-tinoco')
 
-    const isWin = process.platform === 'win32'
-    const nextBin = path.join(appPath, 'node_modules', '.bin', isWin ? 'next.cmd' : 'next')
+    log(`Starting Next.js from: ${appPath}`)
 
-    nextServer = spawn(nextBin, ['start', '-p', String(PORT)], {
+    // Verificar que la ruta existe
+    if (!fs.existsSync(appPath)) {
+      return reject(new Error(`Web app path not found: ${appPath}`))
+    }
+
+    // Verificar que el build de Next.js existe
+    const nextBuildDir = path.join(appPath, '.next')
+    if (!fs.existsSync(nextBuildDir)) {
+      return reject(new Error(`.next build dir not found at: ${nextBuildDir}`))
+    }
+
+    const isWin = process.platform === 'win32'
+
+    // El script JS de Next.js (funciona en todos los OS con cualquier node)
+    const nextScript = path.join(appPath, 'node_modules', 'next', 'dist', 'bin', 'next')
+
+    if (!fs.existsSync(nextScript)) {
+      return reject(new Error(`next script not found at: ${nextScript}`))
+    }
+
+    // node.exe se empaqueta junto al .exe en la carpeta de instalación
+    // (extraFiles en electron-builder.yml lo copia ahí)
+    const electronDir = path.dirname(app.getPath('exe'))
+    const nodeWin     = path.join(electronDir, 'node.exe')
+
+    let nodeBin: string
+    if (isWin) {
+      if (fs.existsSync(nodeWin)) {
+        nodeBin = nodeWin
+      } else {
+        // Fallback: node del PATH (si el usuario tiene Node instalado)
+        nodeBin = 'node.exe'
+        log(`WARN: node.exe not found at ${nodeWin}, falling back to PATH`)
+      }
+    } else {
+      nodeBin = 'node'
+    }
+
+    log(`node binary: ${nodeBin}`)
+    log(`next script: ${nextScript}`)
+
+    const env = {
+      ...process.env,
+      NODE_ENV: 'production',
+      PORT: String(PORT),
+      NEXT_PUBLIC_SUPABASE_URL:      process.env.NEXT_PUBLIC_SUPABASE_URL      ?? '',
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '',
+      SUPABASE_SERVICE_ROLE_KEY:     process.env.SUPABASE_SERVICE_ROLE_KEY     ?? '',
+      NEXT_PUBLIC_APP_URL: `http://localhost:${PORT}`,
+      BROWSER: 'none',
+    }
+
+    nextServer = spawn(nodeBin, [nextScript, 'start', '-p', String(PORT)], {
       cwd: appPath,
-      env: { ...process.env, NODE_ENV: 'production' },
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: isWin, // necesario en Windows para .cmd
+      // En Windows NO usar shell:true porque distorsiona los paths con espacios
     })
 
+    let resolved = false
+
     nextServer.stdout?.on('data', (data: Buffer) => {
-      if (data.toString().toLowerCase().includes('ready')) resolve()
+      const text = data.toString()
+      log(`[next] ${text.trim()}`)
+      if (!resolved && (text.toLowerCase().includes('ready') || text.includes('started server'))) {
+        resolved = true
+        resolve()
+      }
     })
 
     nextServer.stderr?.on('data', (data: Buffer) => {
-      console.error('[next-server]', data.toString())
+      log(`[next:err] ${data.toString().trim()}`)
     })
 
-    nextServer.on('error', reject)
+    nextServer.on('error', (err) => {
+      log(`[next:spawn-error] ${err.message}`)
+      if (!resolved) reject(err)
+    })
+
     nextServer.on('exit', (code) => {
-      if (code !== 0) reject(new Error(`Next.js exited with code ${code}`))
+      log(`[next:exit] code=${code}`)
+      if (!resolved && code !== 0) {
+        reject(new Error(`Next.js exited with code ${code}`))
+      }
     })
 
-    setTimeout(() => reject(new Error('Next.js startup timeout (45s)')), 45000)
+    // Timeout generoso para máquinas lentas
+    setTimeout(() => {
+      if (!resolved) reject(new Error('Next.js no respondió en 60 segundos'))
+    }, 60000)
   })
 }
 
 // ── Esperar respuesta HTTP del servidor ──────────────────────────
-function waitForServer(maxAttempts = 45): Promise<void> {
+function waitForServer(maxAttempts = 60): Promise<void> {
   return new Promise((resolve, reject) => {
     let attempts = 0
     const check = () => {
       const req = http.get(`http://localhost:${PORT}`, (res) => {
+        log(`[http-check] status=${res.statusCode} attempt=${attempts}`)
         if (res.statusCode && res.statusCode < 500) resolve()
         else retry()
       })
-      req.on('error', retry)
-      req.setTimeout(1000, () => { req.destroy(); retry() })
+      req.on('error', () => retry())
+      req.setTimeout(1500, () => { req.destroy(); retry() })
     }
     const retry = () => {
       attempts++
-      if (attempts >= maxAttempts) reject(new Error('Server did not respond in time'))
-      else setTimeout(check, 1000)
+      if (attempts >= maxAttempts) {
+        reject(new Error(`Servidor no respondió después de ${maxAttempts} intentos`))
+      } else {
+        setTimeout(check, 1000)
+      }
     }
     check()
+  })
+}
+
+// Auto-updater
+function setupAutoUpdater() {
+  if (!IS_PACKAGED) return
+
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('checking-for-update', () => log('Checking for update...'))
+  autoUpdater.on('update-not-available', () => log('App is up to date'))
+
+  autoUpdater.on('update-available', (info) => {
+    log(`Update available: ${info.version}`)
+  })
+
+  autoUpdater.on('download-progress', (p) => {
+    log(`Download progress: ${Math.round(p.percent)}%`)
+  })
+
+  autoUpdater.on('update-downloaded', (info) => {
+    log(`Update downloaded: ${info.version}`)
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Actualizacion lista',
+      message: `La version ${info.version} esta lista para instalar.`,
+      detail: 'La aplicacion se reiniciara para aplicar la actualizacion.',
+      buttons: ['Reiniciar ahora', 'Mas tarde'],
+      defaultId: 0,
+    }).then(({ response }) => {
+      if (response === 0) autoUpdater.quitAndInstall()
+    })
+  })
+
+  autoUpdater.on('error', (err) => {
+    log(`Auto-updater error: ${err.message}`)
+  })
+
+  log('Starting auto-updater check...')
+  autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+    log(`checkForUpdates failed: ${err.message}`)
   })
 }
 
@@ -165,8 +290,6 @@ ipcMain.handle('app:getVersion', () => app.getVersion())
 ipcMain.handle('app:isOnline', () => net.isOnline())
 ipcMain.handle('app:getPath', (_e, name: string) => app.getPath(name as Parameters<typeof app.getPath>[0]))
 ipcMain.handle('app:isKiosk', () => KIOSK_MODE)
-
-// Control de ventana desde el renderer (para modo sin frame)
 ipcMain.handle('window:minimize', () => mainWindow?.minimize())
 ipcMain.handle('window:maximize', () => {
   if (mainWindow?.isMaximized()) mainWindow.unmaximize()
@@ -181,18 +304,30 @@ registerSyncHandlers()
 
 // ── Ciclo de vida ─────────────────────────────────────────────────
 app.whenReady().then(async () => {
+  log('App ready — starting up')
+  log(`IS_PACKAGED=${IS_PACKAGED}  PORT=${PORT}  platform=${process.platform}`)
+  log(`resourcesPath=${process.resourcesPath}`)
+
   getDb()
   setupAutoLaunch()
   startSyncEngine()
   createSplash()
 
   try {
-    if (IS_PACKAGED) await startNextServer()
+    if (IS_PACKAGED) {
+      log('Starting Next.js server...')
+      await startNextServer()
+      log('Next.js server started, waiting for HTTP...')
+    }
     await waitForServer()
+    log('Server responding — opening main window')
     createMainWindow()
-  } catch (err) {
-    console.error('Startup error:', err)
-    app.quit()
+    setupAutoUpdater()
+  } catch (err: any) {
+    fatalError(
+      'Error al iniciar El Mercader POS',
+      err?.message ?? String(err)
+    )
   }
 })
 
@@ -206,6 +341,7 @@ app.on('activate', () => {
 })
 
 app.on('before-quit', () => {
+  log('App quitting')
   globalShortcut.unregisterAll()
   stopSyncEngine()
   if (nextServer) { nextServer.kill(); nextServer = null }

@@ -1,7 +1,8 @@
 {
   "name": "pos-tinoco-desktop",
-  "version": "1.0.0",
+  "version": "1.1.7",
   "description": "El Mercader del Bajío — POS Desktop (Electron)",
+  "author": "Tinoco",
   "private": true,
   "main": "electron-dist/main.js",
   "scripts": {
@@ -24,6 +25,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^12.10.0",
     "dotenv": "^17.4.2",
-    "electron-store": "^8.2.0"
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.8.3"
   }
 }
