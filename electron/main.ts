@@ -2,7 +2,7 @@ import * as dotenv from 'dotenv'
 import * as path from 'path'
 import * as http from 'http'
 import * as fs from 'fs'
-import { spawn, ChildProcess } from 'child_process'
+import { spawn, ChildProcess, execSync } from 'child_process'
 import { app, BrowserWindow, Menu, shell, ipcMain, net, globalShortcut, dialog } from 'electron'
 import { autoUpdater } from 'electron-updater'
 
@@ -117,6 +117,40 @@ function createMainWindow() {
 // ── Arrancar servidor Next.js ────────────────────────────────────
 // En Windows dentro del asar, los .cmd de node_modules/.bin no funcionan.
 // Usamos `node` directamente apuntando al script de Next.js.
+// ── Liberar el puerto si quedó un proceso zombi de una instancia anterior ──
+function freePort(port: number) {
+  if (process.platform !== 'win32') return
+  try {
+    const out = execSync(`netstat -ano -p tcp | findstr :${port}`, { encoding: 'utf-8' })
+    const pids = new Set<string>()
+    out.split(/\r?\n/).forEach((line) => {
+      const m = line.match(/LISTENING\s+(\d+)/)
+      if (m) pids.add(m[1])
+    })
+    pids.forEach((pid) => {
+      try {
+        execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' })
+        log(`Freed port ${port}: killed PID ${pid}`)
+      } catch { /* ignore */ }
+    })
+  } catch { /* netstat sin resultados = puerto libre */ }
+}
+
+// ── Matar el proceso de Next.js (en Windows mata todo el árbol) ──
+function killNextServer() {
+  if (!nextServer) return
+  const pid = nextServer.pid
+  if (process.platform === 'win32' && pid != null) {
+    try {
+      execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' })
+      log(`killNextServer: taskkill /F /T /PID ${pid}`)
+    } catch { /* ignore */ }
+  } else {
+    try { nextServer.kill('SIGTERM') } catch { /* ignore */ }
+  }
+  nextServer = null
+}
+
 function startNextServer(): Promise<void> {
   return new Promise((resolve, reject) => {
     const appPath = IS_PACKAGED
@@ -176,6 +210,9 @@ function startNextServer(): Promise<void> {
       NEXT_PUBLIC_APP_URL: `http://localhost:${PORT}`,
       BROWSER: 'none',
     }
+
+    // Si una instancia previa dejó node.exe ocupando el puerto, liberarlo
+    freePort(PORT)
 
     nextServer = spawn(nodeBin, [nextScript, 'start', '-p', String(PORT)], {
       cwd: appPath,
@@ -332,7 +369,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  if (nextServer) { nextServer.kill(); nextServer = null }
+  killNextServer()
   if (process.platform !== 'darwin') app.quit()
 })
 
@@ -344,6 +381,6 @@ app.on('before-quit', () => {
   log('App quitting')
   globalShortcut.unregisterAll()
   stopSyncEngine()
-  if (nextServer) { nextServer.kill(); nextServer = null }
+  killNextServer()
   closeDb()
 })
