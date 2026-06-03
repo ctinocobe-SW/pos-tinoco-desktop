@@ -308,7 +308,18 @@ function setupAutoUpdater() {
       buttons: ['Reiniciar ahora', 'Mas tarde'],
       defaultId: 0,
     }).then(({ response }) => {
-      if (response === 0) autoUpdater.quitAndInstall()
+      if (response === 0) {
+        // CRÍTICO: matar el servidor Next.js (node.exe) y liberar el puerto
+        // ANTES de instalar. Si node.exe sigue vivo, bloquea archivos y NSIS
+        // deja la instalación a medias → acceso directo roto.
+        log('Preparando instalación: cerrando Next.js y liberando puerto...')
+        killNextServer()
+        freePort(PORT)
+        stopSyncEngine()
+        closeDb()
+        // isSilent=false (mostrar instalador), isForceRunAfter=true (reabrir al terminar)
+        setTimeout(() => autoUpdater.quitAndInstall(false, true), 800)
+      }
     })
   })
 
@@ -382,5 +393,6 @@ app.on('before-quit', () => {
   globalShortcut.unregisterAll()
   stopSyncEngine()
   killNextServer()
+  freePort(PORT)
   closeDb()
 })
