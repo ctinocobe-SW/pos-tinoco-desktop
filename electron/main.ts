@@ -70,7 +70,7 @@ function createMainWindow() {
     minWidth: 900,
     minHeight: 600,
     show: false,
-    title: 'El Mercader del Bajío — POS',
+    title: 'El Mercader del Bajío — POS (BETA)',
     frame: !KIOSK_MODE,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -204,6 +204,9 @@ function startNextServer(): Promise<void> {
       ...process.env,
       NODE_ENV: 'production',
       PORT: String(PORT),
+      // Zona horaria fija para que las fechas del servidor sean siempre CDMX,
+      // sin importar la configuración regional del equipo.
+      TZ: 'America/Mexico_City',
       NEXT_PUBLIC_SUPABASE_URL:      process.env.NEXT_PUBLIC_SUPABASE_URL      ?? '',
       NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '',
       SUPABASE_SERVICE_ROLE_KEY:     process.env.SUPABASE_SERVICE_ROLE_KEY     ?? '',
