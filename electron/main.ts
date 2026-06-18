@@ -350,6 +350,36 @@ ipcMain.handle('window:close', () => {
   if (!KIOSK_MODE) mainWindow?.close()
 })
 
+// Impresión silenciosa (sin diálogo de Windows) a la impresora predeterminada.
+// El contenido a imprimir ya está aislado por el CSS @media print del ticket.
+ipcMain.handle('print:silent', async () => {
+  if (!mainWindow) return { ok: false, error: 'Ventana no disponible' }
+  return await new Promise((resolve) => {
+    mainWindow!.webContents.print(
+      {
+        silent: true,            // sin diálogo
+        printBackground: true,   // imprime el logo / fondos
+        margins: { marginType: 'none' },
+        // Papel térmico 80mm de ancho (alto se ajusta al contenido). En micrones.
+        pageSize: { width: 80000, height: 200000 },
+      },
+      (success, failureReason) => {
+        resolve(success ? { ok: true } : { ok: false, error: failureReason })
+      },
+    )
+  })
+})
+
+// Lista de impresoras disponibles (por si luego se quiere elegir una).
+ipcMain.handle('print:listPrinters', async () => {
+  if (!mainWindow) return []
+  try {
+    return await mainWindow.webContents.getPrintersAsync()
+  } catch {
+    return []
+  }
+})
+
 registerTicketHandlers()
 registerSyncHandlers()
 

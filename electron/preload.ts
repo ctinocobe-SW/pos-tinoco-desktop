@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximizeWindow: (): Promise<void> => ipcRenderer.invoke('window:maximize'),
   closeWindow: (): Promise<void> => ipcRenderer.invoke('window:close'),
 
+  // Impresión silenciosa (sin diálogo) a la impresora predeterminada
+  printSilent: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('print:silent'),
+  listPrinters: (): Promise<unknown[]> => ipcRenderer.invoke('print:listPrinters'),
+
   // Tickets offline (Fase 1)
   createTicket: (payload: unknown): Promise<unknown> =>
     ipcRenderer.invoke('ticket:create', payload),
