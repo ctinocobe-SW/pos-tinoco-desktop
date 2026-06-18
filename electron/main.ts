@@ -376,8 +376,9 @@ ipcMain.handle('print:silent', async () => {
         printBackground: true,
         ...(deviceName ? { deviceName } : {}),
         margins: { marginType: 'none' },
-        // Ancho 80mm; el alto lo maneja el driver del rollo térmico.
-        pageSize: { width: 80000, height: 297000 },
+        // NO forzar pageSize: la TM-T88V es de rollo continuo. Si se impone un
+        // tamaño fijo en mm, el driver térmico descarta el trabajo (success=true
+        // pero no sale papel). Dejamos que use el tamaño configurado en Windows.
       },
       (success, failureReason) => {
         log(`Resultado impresión: success=${success} reason=${failureReason ?? '-'}`)
