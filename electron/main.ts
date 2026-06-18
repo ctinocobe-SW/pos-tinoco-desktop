@@ -350,21 +350,38 @@ ipcMain.handle('window:close', () => {
   if (!KIOSK_MODE) mainWindow?.close()
 })
 
-// Impresión silenciosa (sin diálogo de Windows) a la impresora predeterminada.
+// Impresión silenciosa (sin diálogo de Windows).
 // El contenido a imprimir ya está aislado por el CSS @media print del ticket.
 ipcMain.handle('print:silent', async () => {
   if (!mainWindow) return { ok: false, error: 'Ventana no disponible' }
+
+  // Resolver explícitamente la impresora predeterminada y pasarla por deviceName.
+  // (En Windows, silent sin deviceName a veces no llega al spooler correcto.)
+  let deviceName = ''
+  try {
+    const printers = await mainWindow.webContents.getPrintersAsync()
+    log(`Impresoras: ${printers.map((p) => `${p.name}${p.isDefault ? '(default)' : ''}`).join(', ') || 'ninguna'}`)
+    const def = printers.find((p) => p.isDefault) ?? printers[0]
+    if (def) deviceName = def.name
+  } catch (e) {
+    log(`Error listando impresoras: ${String(e)}`)
+  }
+
+  log(`Imprimiendo en: "${deviceName || '(predeterminada del sistema)'}"`)
+
   return await new Promise((resolve) => {
     mainWindow!.webContents.print(
       {
-        silent: true,            // sin diálogo
-        printBackground: true,   // imprime el logo / fondos
+        silent: true,
+        printBackground: true,
+        ...(deviceName ? { deviceName } : {}),
         margins: { marginType: 'none' },
-        // Papel térmico 80mm de ancho (alto se ajusta al contenido). En micrones.
-        pageSize: { width: 80000, height: 200000 },
+        // Ancho 80mm; el alto lo maneja el driver del rollo térmico.
+        pageSize: { width: 80000, height: 297000 },
       },
       (success, failureReason) => {
-        resolve(success ? { ok: true } : { ok: false, error: failureReason })
+        log(`Resultado impresión: success=${success} reason=${failureReason ?? '-'}`)
+        resolve(success ? { ok: true, deviceName } : { ok: false, error: failureReason })
       },
     )
   })
