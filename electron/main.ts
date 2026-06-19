@@ -114,6 +114,13 @@ function createMainWindow() {
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
+async function prepareTicketPrintLayout() {
+  // Los separadores ahora son bordes CSS (border-t), no caracteres de texto.
+  // El layout de impresión está definido en globals.css + @page ticket.
+  // Esta función no necesita inyectar nada; se mantiene por si acaso.
+  if (!mainWindow || mainWindow.isDestroyed()) return
+}
+
 // ── Arrancar servidor Next.js ────────────────────────────────────
 // En Windows dentro del asar, los .cmd de node_modules/.bin no funcionan.
 // Usamos `node` directamente apuntando al script de Next.js.
@@ -354,6 +361,8 @@ ipcMain.handle('window:close', () => {
 // El contenido a imprimir ya está aislado por el CSS @media print del ticket.
 ipcMain.handle('print:silent', async () => {
   if (!mainWindow) return { ok: false, error: 'Ventana no disponible' }
+
+  await prepareTicketPrintLayout()
 
   // Resolver explícitamente la impresora predeterminada y pasarla por deviceName.
   // (En Windows, silent sin deviceName a veces no llega al spooler correcto.)

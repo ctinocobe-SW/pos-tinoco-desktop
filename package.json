@@ -1,6 +1,6 @@
 {
   "name": "pos-tinoco-desktop",
-  "version": "1.1.48",
+  "version": "1.1.49",
   "description": "El Mercader del Bajío — POS Desktop (Electron)",
   "author": "Tinoco",
   "private": true,
