@@ -161,6 +161,47 @@ async function measureTicketHeightMm(): Promise<number | null> {
   }
 }
 
+/**
+ * Espera, dentro del renderer, a que el ticket esté realmente listo para
+ * imprimirse: portal montado, con altura > 0 y con el logo ya cargado.
+ * Esta es la causa #1 del "ticket en blanco": webContents.print() captura el
+ * DOM en el instante de la llamada, y si React aún no montó el portal (o la
+ * imagen del logo no cargó), imprime una página vacía. Reintenta hasta ~3s.
+ */
+async function waitForTicketReady(): Promise<boolean> {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  try {
+    return (await mainWindow.webContents.executeJavaScript(
+      `(async () => {
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        for (let i = 0; i < 30; i++) {
+          const el = document.querySelector('#ticket-print-portal .ticket-slip');
+          if (el) {
+            // Medir con un clon visible fuera de pantalla (el portal está display:none).
+            const probe = document.createElement('div');
+            probe.style.cssText = 'position:absolute;left:-10000px;top:0;width:72mm;visibility:hidden;';
+            const clone = el.cloneNode(true);
+            clone.style.display = 'block';
+            probe.appendChild(clone);
+            document.body.appendChild(probe);
+            const h = clone.getBoundingClientRect().height || clone.scrollHeight || 0;
+            document.body.removeChild(probe);
+            // Esperar a que todas las imágenes del ticket terminen de cargar.
+            const imgs = Array.from(el.querySelectorAll('img'));
+            const imgsOk = imgs.every((im) => im.complete && im.naturalWidth > 0);
+            if (h > 50 && imgsOk) return true;
+          }
+          await sleep(100);
+        }
+        return false;
+      })()`,
+      true,
+    )) as boolean
+  } catch {
+    return false
+  }
+}
+
 async function prepareTicketPrintLayout() {
   // El layout de impresión está definido en globals.css + @page ticket.
   // La medición de altura se hace en measureTicketHeightMm().
@@ -409,6 +450,11 @@ ipcMain.handle('print:silent', async () => {
   if (!mainWindow) return { ok: false, error: 'Ventana no disponible' }
 
   await prepareTicketPrintLayout()
+
+  // Esperar a que el ticket esté montado y pintado antes de imprimir. Sin esto,
+  // webContents.print() puede capturar un DOM vacío → ticket en blanco.
+  const ready = await waitForTicketReady()
+  log(`Ticket listo para imprimir: ${ready ? 'sí' : 'NO (se imprime de todos modos)'}`)
 
   // Resolver explícitamente la impresora predeterminada y pasarla por deviceName.
   // (En Windows, silent sin deviceName a veces no llega al spooler correcto.)
