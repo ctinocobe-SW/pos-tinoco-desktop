@@ -617,46 +617,25 @@ ipcMain.handle('print:raw', async (_event, base64: string, printerName?: string)
   try {
     fs.writeFileSync(dataFile, Buffer.from(base64, 'base64'))
 
-    // Script PowerShell con DOS estrategias:
-    //   1) Escribir los bytes DIRECTO al puerto de la impresora (USB00x / COM /
-    //      IP). Esto EVITA el driver Epson APD, que descarta el ESC/POS crudo
-    //      (papel en blanco aunque el spooler diga OK). Es lo que de verdad
-    //      hace falta con el driver oficial instalado.
-    //   2) Si no se puede resolver/abrir el puerto, caer al método winspool RAW.
+    // PLAN B (definitivo para el driver Epson APD): el puerto ESDPRT001 del
+    // driver oficial bloquea la escritura directa Y descarta el ESC/POS por
+    // spooler. Solución: crear (una vez) una cola "Generic / Text Only" sobre el
+    // MISMO puerto físico de la Epson. Esa cola hace passthrough RAW garantizado
+    // porque NO usa el driver Epson. Luego mandamos el ESC/POS por winspool RAW
+    // a esa cola Generic. Si ya existe, se reutiliza.
+    const RAW_QUEUE = 'POS-Tinoco-RAW'
     const script = `
 $ErrorActionPreference = 'Stop'
 $printer = @'
 ${device}
 '@
+$rawQueue = '${RAW_QUEUE}'
 $path = @'
 ${dataFile}
 '@
 $bytes = [System.IO.File]::ReadAllBytes($path)
 
-function Write-ToPort($portName, $data) {
-  if ($portName -match '^(USB|LPT|ESDPRT)\\d+') {
-    # Puerto USB/LPT/ESDPRT: abrir el dispositivo del puerto por su nombre Win32.
-    $fs = New-Object System.IO.FileStream("\\\\.\\$portName", [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write)
-    try { $fs.Write($data, 0, $data.Length); $fs.Flush() } finally { $fs.Close() }
-    return $true
-  }
-  if ($portName -match '^COM\\d+') {
-    $sp = New-Object System.IO.Ports.SerialPort($portName, 9600)
-    $sp.Open(); try { $sp.Write($data, 0, $data.Length) } finally { $sp.Close() }
-    return $true
-  }
-  # Puerto IP (impresora de red): TCP al 9100.
-  if ($portName -match '^(\\d{1,3}\\.){3}\\d{1,3}') {
-    $ip = ($portName -split ':')[0]
-    $client = New-Object System.Net.Sockets.TcpClient($ip, 9100)
-    $stream = $client.GetStream()
-    try { $stream.Write($data, 0, $data.Length); $stream.Flush() } finally { $stream.Close(); $client.Close() }
-    return $true
-  }
-  return $false
-}
-
-# Resolver el puerto real de la impresora.
+# 1) Resolver el puerto físico de la impresora Epson.
 $port = $null
 try { $port = (Get-Printer -Name $printer -ErrorAction Stop).PortName } catch {}
 if (-not $port) {
@@ -664,16 +643,31 @@ if (-not $port) {
 }
 Write-Output ("PORT=" + $port)
 
-$sentDirect = $false
-if ($port) {
-  try { $sentDirect = Write-ToPort $port $bytes } catch { Write-Output ("PORTERR=" + $_.Exception.Message) }
+# 2) Asegurar la cola "Generic / Text Only" sobre ese mismo puerto.
+$driverName = 'Generic / Text Only'
+$haveQueue = $false
+try {
+  if (Get-Printer -Name $rawQueue -ErrorAction SilentlyContinue) {
+    $haveQueue = $true
+  } elseif ($port) {
+    try { Add-PrinterDriver -Name $driverName -ErrorAction Stop } catch {}
+    Add-Printer -Name $rawQueue -DriverName $driverName -PortName $port -ErrorAction Stop
+    Start-Sleep -Milliseconds 400
+    $haveQueue = $true
+    Write-Output 'QUEUE=created'
+  }
+} catch {
+  Write-Output ("QUEUEERR=" + $_.Exception.Message)
 }
+if ($haveQueue) { Write-Output 'QUEUE=ok' }
 
-if ($sentDirect) {
-  Write-Output 'OK-PORT'
-} else {
-  # Fallback: winspool RAW (puede que el driver lo descarte, pero lo intentamos).
-  $src = @"
+# 3) Mandar el ESC/POS por winspool RAW. Si la cola Generic existe, usarla
+#    (passthrough garantizado); si no, intentar la impresora original.
+$target = $printer
+if ($haveQueue) { $target = $rawQueue }
+Write-Output ("TARGET=" + $target)
+
+$src = @"
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -700,10 +694,9 @@ public class RawPrinter {
   }
 }
 "@
-  Add-Type -TypeDefinition $src -Language CSharp
-  [RawPrinter]::Send($printer, $bytes)
-  Write-Output 'OK-SPOOL'
-}
+Add-Type -TypeDefinition $src -Language CSharp
+[RawPrinter]::Send($target, $bytes)
+Write-Output 'OK-RAW'
 `
     fs.writeFileSync(ps1File, script, 'utf-8')
     log(`print:raw → enviando ${Buffer.from(base64, 'base64').length} bytes a "${device}"`)
@@ -715,9 +708,9 @@ public class RawPrinter {
       ps.stderr.on('data', (d) => { err += d.toString() })
       ps.on('close', (code) => {
         log(`print:raw resultado: code=${code} out=${out.trim().replace(/\s+/g, ' ')} err=${err.trim().replace(/\s+/g, ' ')}`)
-        // OK-PORT = se escribió directo al puerto (evita el driver, lo ideal).
-        // OK-SPOOL = se usó winspool RAW (puede que el driver lo descarte).
-        if (code === 0 && /OK-PORT|OK-SPOOL/.test(out)) resolve({ ok: true })
+        // OK-RAW = se mandó por winspool RAW a la cola Generic/Text Only (o a la
+        // original como último recurso). La cola Generic hace passthrough real.
+        if (code === 0 && /OK-RAW/.test(out)) resolve({ ok: true })
         else resolve({ ok: false, error: err.trim() || `PowerShell salió con código ${code}` })
       })
     })
