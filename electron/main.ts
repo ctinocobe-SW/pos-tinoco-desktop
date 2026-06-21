@@ -617,7 +617,12 @@ ipcMain.handle('print:raw', async (_event, base64: string, printerName?: string)
   try {
     fs.writeFileSync(dataFile, Buffer.from(base64, 'base64'))
 
-    // Script PowerShell: abre la impresora con winspool y le manda los bytes RAW.
+    // Script PowerShell con DOS estrategias:
+    //   1) Escribir los bytes DIRECTO al puerto de la impresora (USB00x / COM /
+    //      IP). Esto EVITA el driver Epson APD, que descarta el ESC/POS crudo
+    //      (papel en blanco aunque el spooler diga OK). Es lo que de verdad
+    //      hace falta con el driver oficial instalado.
+    //   2) Si no se puede resolver/abrir el puerto, caer al método winspool RAW.
     const script = `
 $ErrorActionPreference = 'Stop'
 $printer = @'
@@ -626,7 +631,49 @@ ${device}
 $path = @'
 ${dataFile}
 '@
-$src = @"
+$bytes = [System.IO.File]::ReadAllBytes($path)
+
+function Write-ToPort($portName, $data) {
+  if ($portName -match '^(USB|LPT|ESDPRT)\\d+') {
+    # Puerto USB/LPT/ESDPRT: abrir el dispositivo del puerto por su nombre Win32.
+    $fs = New-Object System.IO.FileStream("\\\\.\\$portName", [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write)
+    try { $fs.Write($data, 0, $data.Length); $fs.Flush() } finally { $fs.Close() }
+    return $true
+  }
+  if ($portName -match '^COM\\d+') {
+    $sp = New-Object System.IO.Ports.SerialPort($portName, 9600)
+    $sp.Open(); try { $sp.Write($data, 0, $data.Length) } finally { $sp.Close() }
+    return $true
+  }
+  # Puerto IP (impresora de red): TCP al 9100.
+  if ($portName -match '^(\\d{1,3}\\.){3}\\d{1,3}') {
+    $ip = ($portName -split ':')[0]
+    $client = New-Object System.Net.Sockets.TcpClient($ip, 9100)
+    $stream = $client.GetStream()
+    try { $stream.Write($data, 0, $data.Length); $stream.Flush() } finally { $stream.Close(); $client.Close() }
+    return $true
+  }
+  return $false
+}
+
+# Resolver el puerto real de la impresora.
+$port = $null
+try { $port = (Get-Printer -Name $printer -ErrorAction Stop).PortName } catch {}
+if (-not $port) {
+  try { $port = (Get-WmiObject -Class Win32_Printer -Filter "Name='$($printer.Replace("'","''"))'").PortName } catch {}
+}
+Write-Output ("PORT=" + $port)
+
+$sentDirect = $false
+if ($port) {
+  try { $sentDirect = Write-ToPort $port $bytes } catch { Write-Output ("PORTERR=" + $_.Exception.Message) }
+}
+
+if ($sentDirect) {
+  Write-Output 'OK-PORT'
+} else {
+  # Fallback: winspool RAW (puede que el driver lo descarte, pero lo intentamos).
+  $src = @"
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -640,25 +687,23 @@ public class RawPrinter {
   [DllImport("winspool.Drv", EntryPoint="StartPagePrinter", SetLastError=true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
   [DllImport("winspool.Drv", EntryPoint="EndPagePrinter", SetLastError=true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
   [DllImport("winspool.Drv", EntryPoint="WritePrinter", SetLastError=true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] pBytes, int dwCount, out int dwWritten);
-  public static void Send(string printerName, string filePath) {
-    byte[] bytes = File.ReadAllBytes(filePath);
+  public static void Send(string printerName, byte[] bytes) {
     IntPtr hPrinter;
-    if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero)) throw new Exception("OpenPrinter falló: " + Marshal.GetLastWin32Error());
+    if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero)) throw new Exception("OpenPrinter: " + Marshal.GetLastWin32Error());
     try {
       DOCINFOA di = new DOCINFOA(); di.pDocName = "Ticket POS"; di.pDataType = "RAW";
-      if (!StartDocPrinter(hPrinter, 1, ref di)) throw new Exception("StartDocPrinter falló: " + Marshal.GetLastWin32Error());
+      if (!StartDocPrinter(hPrinter, 1, ref di)) throw new Exception("StartDocPrinter: " + Marshal.GetLastWin32Error());
       StartPagePrinter(hPrinter);
-      int written;
-      WritePrinter(hPrinter, bytes, bytes.Length, out written);
-      EndPagePrinter(hPrinter);
-      EndDocPrinter(hPrinter);
+      int written; WritePrinter(hPrinter, bytes, bytes.Length, out written);
+      EndPagePrinter(hPrinter); EndDocPrinter(hPrinter);
     } finally { ClosePrinter(hPrinter); }
   }
 }
 "@
-Add-Type -TypeDefinition $src -Language CSharp
-[RawPrinter]::Send($printer, $path)
-Write-Output 'OK'
+  Add-Type -TypeDefinition $src -Language CSharp
+  [RawPrinter]::Send($printer, $bytes)
+  Write-Output 'OK-SPOOL'
+}
 `
     fs.writeFileSync(ps1File, script, 'utf-8')
     log(`print:raw → enviando ${Buffer.from(base64, 'base64').length} bytes a "${device}"`)
@@ -669,8 +714,10 @@ Write-Output 'OK'
       ps.stdout.on('data', (d) => { out += d.toString() })
       ps.stderr.on('data', (d) => { err += d.toString() })
       ps.on('close', (code) => {
-        log(`print:raw resultado: code=${code} out=${out.trim()} err=${err.trim()}`)
-        if (code === 0 && out.includes('OK')) resolve({ ok: true })
+        log(`print:raw resultado: code=${code} out=${out.trim().replace(/\s+/g, ' ')} err=${err.trim().replace(/\s+/g, ' ')}`)
+        // OK-PORT = se escribió directo al puerto (evita el driver, lo ideal).
+        // OK-SPOOL = se usó winspool RAW (puede que el driver lo descarte).
+        if (code === 0 && /OK-PORT|OK-SPOOL/.test(out)) resolve({ ok: true })
         else resolve({ ok: false, error: err.trim() || `PowerShell salió con código ${code}` })
       })
     })
