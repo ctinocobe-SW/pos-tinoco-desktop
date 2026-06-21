@@ -208,6 +208,57 @@ async function prepareTicketPrintLayout() {
   if (!mainWindow || mainWindow.isDestroyed()) return
 }
 
+/**
+ * Imprime el ticket en una BrowserWindow OCULTA y dedicada, en vez de imprimir
+ * la ventana principal con CSS @media print (que dejaba el papel en blanco
+ * aunque success=true). Recibe un documento HTML completo y autocontenido
+ * (con sus <style> embebidos) generado por el renderer, lo carga vía data URL,
+ * espera a que pinte y lo manda a imprimir en silencio.
+ */
+async function printHtmlInHiddenWindow(
+  html: string,
+  deviceName: string,
+): Promise<{ ok: boolean; error?: string }> {
+  let printWin: BrowserWindow | null = new BrowserWindow({
+    show: false,
+    width: 320,
+    height: 900,
+    webPreferences: { offscreen: false, javascript: true },
+  })
+
+  // Escribir el HTML a un archivo temporal y cargarlo por file:// — evita el
+  // límite de tamaño de los data URL (el CSS de Tailwind embebido es grande).
+  const tmpFile = path.join(app.getPath('temp'), `ticket-print-${Date.now()}.html`)
+  try {
+    fs.writeFileSync(tmpFile, html, 'utf-8')
+    await printWin.loadFile(tmpFile)
+    // Dar un respiro para que el logo y el layout pinten.
+    await new Promise((r) => setTimeout(r, 350))
+
+    return await new Promise((resolve) => {
+      printWin!.webContents.print(
+        {
+          silent: true,
+          printBackground: true,
+          ...(deviceName ? { deviceName } : {}),
+          margins: { marginType: 'none' },
+        },
+        (success, failureReason) => {
+          log(`Resultado impresión (ventana dedicada): success=${success} reason=${failureReason ?? '-'}`)
+          resolve(success ? { ok: true } : { ok: false, error: failureReason })
+        },
+      )
+    })
+  } catch (e) {
+    log(`Error imprimiendo en ventana dedicada: ${String(e)}`)
+    return { ok: false, error: String(e) }
+  } finally {
+    if (printWin && !printWin.isDestroyed()) printWin.destroy()
+    printWin = null
+    try { fs.unlinkSync(tmpFile) } catch { /* ignore */ }
+  }
+}
+
 // ── Arrancar servidor Next.js ────────────────────────────────────
 // En Windows dentro del asar, los .cmd de node_modules/.bin no funcionan.
 // Usamos `node` directamente apuntando al script de Next.js.
@@ -446,15 +497,10 @@ ipcMain.handle('window:close', () => {
 
 // Impresión silenciosa (sin diálogo de Windows).
 // El contenido a imprimir ya está aislado por el CSS @media print del ticket.
-ipcMain.handle('print:silent', async () => {
+ipcMain.handle('print:silent', async (_event, html?: string) => {
   if (!mainWindow) return { ok: false, error: 'Ventana no disponible' }
 
   await prepareTicketPrintLayout()
-
-  // Esperar a que el ticket esté montado y pintado antes de imprimir. Sin esto,
-  // webContents.print() puede capturar un DOM vacío → ticket en blanco.
-  const ready = await waitForTicketReady()
-  log(`Ticket listo para imprimir: ${ready ? 'sí' : 'NO (se imprime de todos modos)'}`)
 
   // Resolver explícitamente la impresora predeterminada y pasarla por deviceName.
   // (En Windows, silent sin deviceName a veces no llega al spooler correcto.)
@@ -467,6 +513,18 @@ ipcMain.handle('print:silent', async () => {
   } catch (e) {
     log(`Error listando impresoras: ${String(e)}`)
   }
+
+  // RUTA PREFERIDA: si el renderer mandó el HTML del ticket, lo imprimimos en
+  // una ventana oculta dedicada. Es mucho más fiable que imprimir la ventana
+  // principal dependiendo del CSS @media print (que dejaba el papel en blanco).
+  if (html && html.length > 0) {
+    log(`Imprimiendo ticket en ventana dedicada (${html.length} bytes) → "${deviceName || 'predeterminada'}"`)
+    return await printHtmlInHiddenWindow(html, deviceName)
+  }
+
+  // RUTA FALLBACK (sin HTML): método anterior sobre la ventana principal.
+  const ready = await waitForTicketReady()
+  log(`Ticket listo para imprimir: ${ready ? 'sí' : 'NO (se imprime de todos modos)'}`)
 
   // pageSize adaptativo (opt-in). El driver térmico de la TM-T88V a veces
   // DESCARTA el trabajo si se le impone un tamaño en mm (success=true pero papel
