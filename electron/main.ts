@@ -590,6 +590,100 @@ ipcMain.handle('print:silent', async (_event, html?: string) => {
   })
 })
 
+// Impresión RAW (ESC/POS) directa al spooler de Windows. La térmica TM-T88V no
+// rasteriza bien el HTML vía webContents.print() (papel en blanco aunque
+// success=true), pero SÍ imprime comandos ESC/POS nativos. Recibe los bytes en
+// base64, los escribe a un archivo y los manda RAW con PowerShell + Win32
+// (winspool), sin dependencias nativas.
+ipcMain.handle('print:raw', async (_event, base64: string, printerName?: string) => {
+  if (process.platform !== 'win32') {
+    return { ok: false, error: 'print:raw solo está disponible en Windows' }
+  }
+  if (!base64) return { ok: false, error: 'Sin datos para imprimir' }
+
+  // Resolver impresora: la indicada, o la predeterminada del sistema.
+  let device = printerName ?? ''
+  if (!device && mainWindow) {
+    try {
+      const printers = await mainWindow.webContents.getPrintersAsync()
+      const def = printers.find((p) => p.isDefault) ?? printers[0]
+      if (def) device = def.name
+    } catch { /* ignore */ }
+  }
+  if (!device) return { ok: false, error: 'No se encontró impresora' }
+
+  const dataFile = path.join(app.getPath('temp'), `ticket-raw-${Date.now()}.bin`)
+  const ps1File = path.join(app.getPath('temp'), `ticket-raw-${Date.now()}.ps1`)
+  try {
+    fs.writeFileSync(dataFile, Buffer.from(base64, 'base64'))
+
+    // Script PowerShell: abre la impresora con winspool y le manda los bytes RAW.
+    const script = `
+$ErrorActionPreference = 'Stop'
+$printer = @'
+${device}
+'@
+$path = @'
+${dataFile}
+'@
+$src = @"
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+public class RawPrinter {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public struct DOCINFOA { public string pDocName; public string pOutputFile; public string pDataType; }
+  [DllImport("winspool.Drv", EntryPoint="OpenPrinterW", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool OpenPrinter(string src, out IntPtr hPrinter, IntPtr pd);
+  [DllImport("winspool.Drv", EntryPoint="ClosePrinter", SetLastError=true)] public static extern bool ClosePrinter(IntPtr hPrinter);
+  [DllImport("winspool.Drv", EntryPoint="StartDocPrinterW", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool StartDocPrinter(IntPtr hPrinter, int level, ref DOCINFOA di);
+  [DllImport("winspool.Drv", EntryPoint="EndDocPrinter", SetLastError=true)] public static extern bool EndDocPrinter(IntPtr hPrinter);
+  [DllImport("winspool.Drv", EntryPoint="StartPagePrinter", SetLastError=true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.Drv", EntryPoint="EndPagePrinter", SetLastError=true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.Drv", EntryPoint="WritePrinter", SetLastError=true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] pBytes, int dwCount, out int dwWritten);
+  public static void Send(string printerName, string filePath) {
+    byte[] bytes = File.ReadAllBytes(filePath);
+    IntPtr hPrinter;
+    if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero)) throw new Exception("OpenPrinter falló: " + Marshal.GetLastWin32Error());
+    try {
+      DOCINFOA di = new DOCINFOA(); di.pDocName = "Ticket POS"; di.pDataType = "RAW";
+      if (!StartDocPrinter(hPrinter, 1, ref di)) throw new Exception("StartDocPrinter falló: " + Marshal.GetLastWin32Error());
+      StartPagePrinter(hPrinter);
+      int written;
+      WritePrinter(hPrinter, bytes, bytes.Length, out written);
+      EndPagePrinter(hPrinter);
+      EndDocPrinter(hPrinter);
+    } finally { ClosePrinter(hPrinter); }
+  }
+}
+"@
+Add-Type -TypeDefinition $src -Language CSharp
+[RawPrinter]::Send($printer, $path)
+Write-Output 'OK'
+`
+    fs.writeFileSync(ps1File, script, 'utf-8')
+    log(`print:raw → enviando ${Buffer.from(base64, 'base64').length} bytes a "${device}"`)
+
+    const result = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      const ps = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1File])
+      let out = '', err = ''
+      ps.stdout.on('data', (d) => { out += d.toString() })
+      ps.stderr.on('data', (d) => { err += d.toString() })
+      ps.on('close', (code) => {
+        log(`print:raw resultado: code=${code} out=${out.trim()} err=${err.trim()}`)
+        if (code === 0 && out.includes('OK')) resolve({ ok: true })
+        else resolve({ ok: false, error: err.trim() || `PowerShell salió con código ${code}` })
+      })
+    })
+    return result
+  } catch (e) {
+    log(`print:raw error: ${String(e)}`)
+    return { ok: false, error: String(e) }
+  } finally {
+    try { fs.unlinkSync(dataFile) } catch { /* ignore */ }
+    try { fs.unlinkSync(ps1File) } catch { /* ignore */ }
+  }
+})
+
 // Lista de impresoras disponibles (por si luego se quiere elegir una).
 ipcMain.handle('print:listPrinters', async () => {
   if (!mainWindow) return []

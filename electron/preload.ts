@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // (más fiable que imprimir la ventana principal con CSS @media print).
   printSilent: (html?: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('print:silent', html),
+  // Impresión RAW ESC/POS directa al spooler (térmica). data = bytes en base64.
+  printRaw: (base64: string, printerName?: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('print:raw', base64, printerName),
   listPrinters: (): Promise<unknown[]> => ipcRenderer.invoke('print:listPrinters'),
 
   // Tickets offline (Fase 1)
