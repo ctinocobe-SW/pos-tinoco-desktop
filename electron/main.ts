@@ -220,20 +220,47 @@ async function printHtmlInHiddenWindow(
   deviceName: string,
 ): Promise<{ ok: boolean; error?: string }> {
   let printWin: BrowserWindow | null = new BrowserWindow({
+    // Una ventana 100% oculta (show:false) a veces NO pinta su contenido en
+    // Chromium → se imprime el layout pero sin texto/imágenes (papel en blanco
+    // con el tamaño correcto). La colocamos fuera de pantalla y "visible" para
+    // forzar el pintado real, sin que el usuario la vea.
     show: false,
-    width: 320,
-    height: 900,
-    webPreferences: { offscreen: false, javascript: true },
+    x: -2000,
+    y: -2000,
+    width: 380,
+    height: 1200,
+    frame: false,
+    skipTaskbar: true,
+    webPreferences: { javascript: true, backgroundThrottling: false },
   })
 
-  // Escribir el HTML a un archivo temporal y cargarlo por file:// — evita el
-  // límite de tamaño de los data URL (el CSS de Tailwind embebido es grande).
+  // Guardar una COPIA inspeccionable del último ticket (no se borra) para poder
+  // abrirla en un navegador y verificar el HTML si algo sale mal.
+  try {
+    fs.writeFileSync(path.join(app.getPath('userData'), 'ultimo-ticket.html'), html, 'utf-8')
+  } catch { /* ignore */ }
+
   const tmpFile = path.join(app.getPath('temp'), `ticket-print-${Date.now()}.html`)
   try {
     fs.writeFileSync(tmpFile, html, 'utf-8')
+
+    // Esperar a que la carga termine de verdad (evento), no un timeout a ciegas.
+    const loaded = new Promise<void>((resolve) => {
+      printWin!.webContents.once('did-finish-load', () => resolve())
+    })
     await printWin.loadFile(tmpFile)
-    // Dar un respiro para que el logo y el layout pinten.
-    await new Promise((r) => setTimeout(r, 350))
+    await loaded
+    // Mostrar fuera de pantalla y forzar pintado.
+    printWin.showInactive()
+    // Esperar a que el documento esté completo y haya pintado un par de frames.
+    await printWin.webContents.executeJavaScript(
+      `new Promise((resolve) => {
+        const done = () => requestAnimationFrame(() => requestAnimationFrame(resolve));
+        if (document.readyState === 'complete') done(); else window.addEventListener('load', done);
+      })`,
+      true,
+    ).catch(() => {})
+    await new Promise((r) => setTimeout(r, 600))
 
     return await new Promise((resolve) => {
       printWin!.webContents.print(
