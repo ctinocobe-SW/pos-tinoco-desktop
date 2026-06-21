@@ -114,10 +114,56 @@ function createMainWindow() {
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
+// Ancho del rollo térmico (Epson TM-T88V = 80mm de papel).
+const TICKET_WIDTH_MM = 80
+
+/**
+ * Mide la altura real (en mm) del ticket ya renderizado en el DOM.
+ * webContents.print() ignora las reglas @page del CSS, así que necesitamos
+ * pasarle un pageSize explícito; si no, Electron usa el tamaño Carta/A4 del
+ * driver de Windows y el ticket sale en una hoja gigante, desalineado a la
+ * izquierda y sin adaptarse a la cantidad de productos.
+ *
+ * Devuelve el alto en milímetros (con un colchón inferior para el corte) o
+ * null si no se pudo medir, en cuyo caso se cae al comportamiento anterior.
+ */
+async function measureTicketHeightMm(): Promise<number | null> {
+  if (!mainWindow || mainWindow.isDestroyed()) return null
+  try {
+    const px = (await mainWindow.webContents.executeJavaScript(
+      `(() => {
+        const el = document.querySelector('#ticket-print-portal .ticket-slip');
+        if (!el) return 0;
+        // IMPORTANTE: el portal está display:none en pantalla, así que mide 0.
+        // NO tocamos el portal original (si lo ocultamos justo antes de imprimir,
+        // webContents.print captura el DOM vacío → ticket en blanco). En su lugar
+        // CLONAMOS el ticket en un contenedor temporal fuera de viewport, lo
+        // medimos y lo borramos. El portal real queda intacto para imprimirse.
+        const probe = document.createElement('div');
+        probe.style.cssText =
+          'position:absolute;left:-10000px;top:0;width:72mm;visibility:hidden;pointer-events:none;';
+        const clone = el.cloneNode(true);
+        clone.style.display = 'block';
+        probe.appendChild(clone);
+        document.body.appendChild(probe);
+        const h = Math.ceil(clone.getBoundingClientRect().height || clone.scrollHeight || 0);
+        document.body.removeChild(probe);
+        return h;
+      })()`,
+      true,
+    )) as number
+    if (!px || px <= 0) return null
+    // CSS px → mm a 96 dpi (1in = 96px = 25.4mm). +6mm de margen de corte.
+    const mm = (px * 25.4) / 96 + 6
+    return Math.max(mm, 40)
+  } catch {
+    return null
+  }
+}
+
 async function prepareTicketPrintLayout() {
-  // Los separadores ahora son bordes CSS (border-t), no caracteres de texto.
   // El layout de impresión está definido en globals.css + @page ticket.
-  // Esta función no necesita inyectar nada; se mantiene por si acaso.
+  // La medición de altura se hace en measureTicketHeightMm().
   if (!mainWindow || mainWindow.isDestroyed()) return
 }
 
@@ -376,7 +422,22 @@ ipcMain.handle('print:silent', async () => {
     log(`Error listando impresoras: ${String(e)}`)
   }
 
-  log(`Imprimiendo en: "${deviceName || '(predeterminada del sistema)'}"`)
+  // pageSize adaptativo (opt-in). El driver térmico de la TM-T88V a veces
+  // DESCARTA el trabajo si se le impone un tamaño en mm (success=true pero papel
+  // en blanco). Por eso por defecto NO forzamos pageSize y dejamos que el ticket
+  // salga con el tamaño del rollo configurado en Windows (que ya es 80x297mm).
+  // Para probar el alto adaptativo, arranca con TICKET_FORCE_PAGESIZE=1.
+  let pageSize: { width: number; height: number } | undefined
+  if (process.env.TICKET_FORCE_PAGESIZE === '1') {
+    const heightMm = await measureTicketHeightMm()
+    // pageSize de Electron se mide en MICRONES (1mm = 1000 micrones).
+    if (heightMm) {
+      pageSize = { width: Math.round(TICKET_WIDTH_MM * 1000), height: Math.round(heightMm * 1000) }
+    }
+    log(`pageSize adaptativo: ${pageSize ? `${TICKET_WIDTH_MM}x${heightMm!.toFixed(1)}mm` : 'medición falló → driver'}`)
+  }
+
+  log(`Imprimiendo en: "${deviceName || '(predeterminada del sistema)'}" — pageSize=${pageSize ? `${TICKET_WIDTH_MM}mm forzado` : '(driver de Windows 80x297)'}`)
 
   return await new Promise((resolve) => {
     mainWindow!.webContents.print(
@@ -385,9 +446,10 @@ ipcMain.handle('print:silent', async () => {
         printBackground: true,
         ...(deviceName ? { deviceName } : {}),
         margins: { marginType: 'none' },
-        // NO forzar pageSize: la TM-T88V es de rollo continuo. Si se impone un
-        // tamaño fijo en mm, el driver térmico descarta el trabajo (success=true
-        // pero no sale papel). Dejamos que use el tamaño configurado en Windows.
+        // pageSize explícito en micrones: ancho del rollo (80mm) + alto medido
+        // del contenido. Esto centra el ticket en el rollo y lo ajusta al número
+        // de productos. Si la medición falla, se omite y se usa el driver.
+        ...(pageSize ? { pageSize } : {}),
       },
       (success, failureReason) => {
         log(`Resultado impresión: success=${success} reason=${failureReason ?? '-'}`)
