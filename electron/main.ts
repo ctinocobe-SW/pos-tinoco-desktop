@@ -635,7 +635,7 @@ ${dataFile}
 '@
 $bytes = [System.IO.File]::ReadAllBytes($path)
 
-# 1) Resolver el puerto físico de la impresora Epson.
+# 1) Resolver el puerto físico de la impresora.
 $port = $null
 try { $port = (Get-Printer -Name $printer -ErrorAction Stop).PortName } catch {}
 if (-not $port) {
@@ -643,28 +643,36 @@ if (-not $port) {
 }
 Write-Output ("PORT=" + $port)
 
-# 2) Asegurar la cola "Generic / Text Only" sobre ese mismo puerto.
-$driverName = 'Generic / Text Only'
-$haveQueue = $false
-try {
-  if (Get-Printer -Name $rawQueue -ErrorAction SilentlyContinue) {
-    $haveQueue = $true
-  } elseif ($port) {
-    try { Add-PrinterDriver -Name $driverName -ErrorAction Stop } catch {}
-    Add-Printer -Name $rawQueue -DriverName $driverName -PortName $port -ErrorAction Stop
-    Start-Sleep -Milliseconds 400
-    $haveQueue = $true
-    Write-Output 'QUEUE=created'
+# 2) ESCRIBIR DIRECTO AL PUERTO USB/LPT/IP. Es lo ideal: evita drivers y colas
+#    (la cola Generic/Text Only filtra el logo y el corte; una cola en mal
+#    estado da error 1905). La NEXTEP usa USB001, que SÍ se puede abrir directo.
+$sentDirect = $false
+if ($port -match '^(USB|LPT)\\d+') {
+  try {
+    $fs = New-Object System.IO.FileStream("\\\\.\\$port", [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write)
+    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush() } finally { $fs.Close() }
+    $sentDirect = $true
+    Write-Output 'OK-PORT'
+  } catch {
+    Write-Output ("PORTERR=" + $_.Exception.Message)
   }
-} catch {
-  Write-Output ("QUEUEERR=" + $_.Exception.Message)
+} elseif ($port -match '^(\\d{1,3}\\.){3}\\d{1,3}') {
+  try {
+    $ip = ($port -split ':')[0]
+    $client = New-Object System.Net.Sockets.TcpClient($ip, 9100)
+    $stream = $client.GetStream()
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() } finally { $stream.Close(); $client.Close() }
+    $sentDirect = $true
+    Write-Output 'OK-PORT'
+  } catch {
+    Write-Output ("PORTERR=" + $_.Exception.Message)
+  }
 }
-if ($haveQueue) { Write-Output 'QUEUE=ok' }
 
-# 3) Mandar el ESC/POS por winspool RAW. Si la cola Generic existe, usarla
-#    (passthrough garantizado); si no, intentar la impresora original.
+# 3) Si la escritura directa NO funcionó, caer a winspool RAW por la impresora
+#    predeterminada (último recurso; puede que el driver filtre binarios).
+if ($sentDirect) { return }
 $target = $printer
-if ($haveQueue) { $target = $rawQueue }
 Write-Output ("TARGET=" + $target)
 
 $src = @"
@@ -708,9 +716,9 @@ Write-Output 'OK-RAW'
       ps.stderr.on('data', (d) => { err += d.toString() })
       ps.on('close', (code) => {
         log(`print:raw resultado: code=${code} out=${out.trim().replace(/\s+/g, ' ')} err=${err.trim().replace(/\s+/g, ' ')}`)
-        // OK-RAW = se mandó por winspool RAW a la cola Generic/Text Only (o a la
-        // original como último recurso). La cola Generic hace passthrough real.
-        if (code === 0 && /OK-RAW/.test(out)) resolve({ ok: true })
+        // OK-PORT = escritura directa al puerto USB/IP (lo ideal: respeta logo y
+        // corte). OK-RAW = winspool RAW como último recurso. Cualquiera = éxito.
+        if (code === 0 && /OK-PORT|OK-RAW/.test(out)) resolve({ ok: true })
         else resolve({ ok: false, error: err.trim() || `PowerShell salió con código ${code}` })
       })
     })
