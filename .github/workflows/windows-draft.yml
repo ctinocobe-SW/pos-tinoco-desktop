@@ -1,0 +1,137 @@
+name: Preparar instalador Windows (borrador)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión nueva (ejemplo 1.1.70; sin v)'
+        required: true
+        type: string
+      web_sha:
+        description: 'SHA completo, revisado, de ctinocobe-SW/Tinoco-POS'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-draft
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Validar entradas
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          WEB_SHA: ${{ inputs.web_sha }}
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Versión inválida' }
+          if ($env:WEB_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Se requiere SHA completo' }
+      - uses: actions/checkout@v4
+        with:
+          path: pos-tinoco-desktop
+          persist-credentials: false
+      - name: Verificar acceso y configuración
+        shell: pwsh
+        env:
+          SOURCE_TOKEN: ${{ secrets.POS_SOURCE_READ_TOKEN }}
+          SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          if (-not $env:SOURCE_TOKEN) { throw 'Configurar POS_SOURCE_READ_TOKEN: solo lectura de Contents del repositorio web privado.' }
+          if (-not $env:SUPABASE_URL -or -not $env:SUPABASE_ANON_KEY) { throw 'Configurar las dos variables públicas NEXT_PUBLIC_SUPABASE_*.' }
+          if ($env:SUPABASE_ANON_KEY -match 'sb_secret_') { throw 'No usar una llave secreta como llave pública.' }
+      - name: Obtener web en revisión exacta
+        uses: actions/checkout@v4
+        with:
+          repository: ctinocobe-SW/Tinoco-POS
+          ref: ${{ inputs.web_sha }}
+          token: ${{ secrets.POS_SOURCE_READ_TOKEN }}
+          path: pos-tinoco
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            pos-tinoco/package-lock.json
+            pos-tinoco-desktop/package-lock.json
+      - name: Comprobar versión y preparar entorno público
+        working-directory: pos-tinoco-desktop
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          if ([version]$env:RELEASE_VERSION -le [version](Get-Content package.json | ConvertFrom-Json).version) { throw 'La versión debe ser mayor a la versión del código.' }
+          npm version $env:RELEASE_VERSION --no-git-tag-version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @("NEXT_PUBLIC_SUPABASE_URL=$env:NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY=$env:NEXT_PUBLIC_SUPABASE_ANON_KEY") | Set-Content -Encoding utf8 .env
+          Copy-Item .env ../pos-tinoco/.env.production.local
+          Copy-Item (Get-Command node).Source build-resources/node.exe -Force
+      - name: Instalar web
+        working-directory: pos-tinoco
+        run: npm ci
+      - name: Validar web
+        working-directory: pos-tinoco
+        run: npm run lint
+      - name: Compilar web local
+        working-directory: pos-tinoco
+        run: npm run build
+      - name: Excluir herramientas de desarrollo del instalador
+        working-directory: pos-tinoco
+        run: npm prune --omit=dev
+      - name: Instalar escritorio
+        working-directory: pos-tinoco-desktop
+        run: npm ci
+      - name: Verificar que no se empaqueten llaves privilegiadas
+        working-directory: pos-tinoco-desktop
+        shell: pwsh
+        run: node scripts/check-release-env.cjs
+      - name: Generar instalador sin publicar
+        working-directory: pos-tinoco-desktop
+        run: npm run build:win -- --publish never
+      - name: Guardar artefactos de prueba
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ inputs.version }}
+          path: |
+            pos-tinoco-desktop/dist/*.exe
+            pos-tinoco-desktop/dist/*.blockmap
+            pos-tinoco-desktop/dist/latest.yml
+          if-no-files-found: error
+          retention-days: 14
+      - name: Crear Release exclusivamente en borrador
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          WEB_SHA: ${{ inputs.web_sha }}
+          DESKTOP_SHA: ${{ github.sha }}
+        run: |
+          $notes = @"
+          Instalador de prueba. NO PUBLICAR hasta validar en Windows venta, impresión, reinicio y sincronización.
+
+          Web: $env:WEB_SHA
+          Escritorio: $env:DESKTOP_SHA
+
+          No contiene SERVICE_ROLE_KEY ni token de GitHub. La arquitectura actual requiere resolver las operaciones administrativas que dependen de esa llave antes de entregar este instalador al cliente. Las operaciones de SQLite que dependen de SERVICE_KEY tampoco están configuradas en este borrador.
+          "@
+          $notes | Set-Content -Encoding utf8 release-notes.md
+          gh release create "v$env:RELEASE_VERSION" --draft --target $env:DESKTOP_SHA --title "v$env:RELEASE_VERSION — pendiente de validación" --notes-file release-notes.md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $files = Get-ChildItem pos-tinoco-desktop/dist -File | Where-Object { $_.Name -match '(\.exe|\.blockmap|latest\.yml)$' }
+          if (-not ($files | Where-Object Name -eq 'latest.yml')) { throw 'Falta latest.yml' }
+          gh release upload "v$env:RELEASE_VERSION" @($files.FullName)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
