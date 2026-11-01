@@ -7,9 +7,10 @@ for (const file of files) {
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim() || line.trimStart().startsWith('#')) continue;
     const key = line.split('=')[0].trim();
-    if (!['NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY'].includes(key)) {
+    if (!['NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'POS_ADMIN_API_URL'].includes(key)) {
       throw new Error(`Variable no permitida en instalador: ${key}`);
     }
+    if (key === 'POS_ADMIN_API_URL' && !line.slice(line.indexOf('=')+1).trim().startsWith('https://')) throw new Error('Backend administrativo debe usar HTTPS');
     if (key === 'NEXT_PUBLIC_SUPABASE_ANON_KEY') {
       const value = line.slice(line.indexOf('=') + 1).trim();
       if (value.startsWith('sb_secret_')) throw new Error('Llave privada en variable pública');

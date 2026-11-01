@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto'
 import * as dotenv from 'dotenv'
 import * as path from 'path'
 import * as http from 'http'
@@ -372,7 +373,7 @@ function startNextServer(): Promise<void> {
     log(`node binary: ${nodeBin}`)
     log(`next script: ${nextScript}`)
 
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       NODE_ENV: 'production',
       PORT: String(PORT),
@@ -381,15 +382,19 @@ function startNextServer(): Promise<void> {
       TZ: 'America/Mexico_City',
       NEXT_PUBLIC_SUPABASE_URL:      process.env.NEXT_PUBLIC_SUPABASE_URL      ?? '',
       NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '',
-      SUPABASE_SERVICE_ROLE_KEY:     process.env.SUPABASE_SERVICE_ROLE_KEY     ?? '',
+      OFFLINE_SESSION_SECRET: process.env.OFFLINE_SESSION_SECRET ?? '',
+      POS_ADMIN_API_URL: process.env.POS_ADMIN_API_URL ?? '',
       NEXT_PUBLIC_APP_URL: `http://localhost:${PORT}`,
       BROWSER: 'none',
     }
 
+    delete env.SUPABASE_SERVICE_ROLE_KEY
+    delete env.SUPABASE_SERVICE_KEY
+
     // Si una instancia previa dejó node.exe ocupando el puerto, liberarlo
     freePort(PORT)
 
-    nextServer = spawn(nodeBin, [nextScript, 'start', '-p', String(PORT)], {
+    nextServer = spawn(nodeBin, [nextScript, 'start', '-H', '127.0.0.1', '-p', String(PORT)], {
       cwd: appPath,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -751,7 +756,15 @@ app.whenReady().then(async () => {
   log(`IS_PACKAGED=${IS_PACKAGED}  PORT=${PORT}  platform=${process.platform}`)
   log(`resourcesPath=${process.resourcesPath}`)
 
-  getDb()
+  // Secreto exclusivo de esta instalación; nunca una llave maestra de Supabase.
+  const secretFile = path.join(app.getPath('userData'), 'offline-session.key')
+  if (!fs.existsSync(secretFile)) fs.writeFileSync(secretFile, randomBytes(48).toString('hex'), { mode: 0o600, flag: 'wx' })
+  process.env.OFFLINE_SESSION_SECRET = fs.readFileSync(secretFile, 'utf8').trim()
+  const localDb = getDb()
+  const backupDir = path.join(app.getPath('userData'), 'backups')
+  fs.mkdirSync(backupDir, { recursive: true })
+  const backupFile = path.join(backupDir, `pos-${new Date().toISOString().slice(0,10)}.db`)
+  if (!fs.existsSync(backupFile)) await localDb.backup(backupFile).catch(error => log(`No se pudo respaldar SQLite: ${String(error)}`))
   setupAutoLaunch()
   startSyncEngine()
   createSplash()

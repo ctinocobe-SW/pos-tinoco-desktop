@@ -76,7 +76,7 @@ jobs:
           if ([version]$env:RELEASE_VERSION -le [version](Get-Content package.json | ConvertFrom-Json).version) { throw 'La versión debe ser mayor a la versión del código.' }
           npm version $env:RELEASE_VERSION --no-git-tag-version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          @("NEXT_PUBLIC_SUPABASE_URL=$env:NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY=$env:NEXT_PUBLIC_SUPABASE_ANON_KEY") | Set-Content -Encoding utf8 .env
+          @("NEXT_PUBLIC_SUPABASE_URL=$env:NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY=$env:NEXT_PUBLIC_SUPABASE_ANON_KEY", "POS_ADMIN_API_URL=https://tinoco-pos-cf.pos-tinoco.workers.dev") | Set-Content -Encoding utf8 .env
           Copy-Item .env ../pos-tinoco/.env.production.local
           Copy-Item (Get-Command node).Source build-resources/node.exe -Force
       - name: Instalar web
@@ -85,6 +85,9 @@ jobs:
       - name: Validar web
         working-directory: pos-tinoco
         run: npm run lint
+      - name: Pruebas de regresión y seguridad
+        working-directory: pos-tinoco
+        run: npm test
       - name: Compilar web local
         working-directory: pos-tinoco
         run: npm run build
@@ -126,7 +129,7 @@ jobs:
           Web: $env:WEB_SHA
           Escritorio: $env:DESKTOP_SHA
 
-          No contiene SERVICE_ROLE_KEY ni token de GitHub. La arquitectura actual requiere resolver las operaciones administrativas que dependen de esa llave antes de entregar este instalador al cliente. Las operaciones de SQLite que dependen de SERVICE_KEY tampoco están configuradas en este borrador.
+          No contiene SERVICE_ROLE_KEY ni token de GitHub. La administración de usuarios utiliza el backend HTTPS con identidad del administrador. Aplicar primero las migraciones compatibles y configurar el backend. Las colas SQLite antiguas se conservan para recuperación; no se envían con llaves maestras.
           "@
           $notes | Set-Content -Encoding utf8 release-notes.md
           gh release create "v$env:RELEASE_VERSION" --draft --target $env:DESKTOP_SHA --title "v$env:RELEASE_VERSION — pendiente de validación" --notes-file release-notes.md
