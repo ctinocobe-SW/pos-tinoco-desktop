@@ -20,5 +20,10 @@ try {
   if ($log -match 'FATAL:|NODE_MODULE_VERSION|not a valid Win32') { throw 'Error de arranque o módulo nativo incompatible' }
   Write-Output 'PASS Windows: Electron empaquetado, SQLite nativo y pantalla de acceso HTTP 200.'
 } finally {
-  & taskkill.exe /PID $appProcess.Id /T /F 2>$null | Out-Null
+  if (-not $appProcess.HasExited) {
+    & taskkill.exe /PID $appProcess.Id /T /F 2>$null | Out-Null
+    # taskkill puede devolver 1 si un hijo ya terminó durante el cierre.
+    # La limpieza no sustituye ni altera las excepciones de las comprobaciones.
+    $global:LASTEXITCODE = 0
+  }
 }
