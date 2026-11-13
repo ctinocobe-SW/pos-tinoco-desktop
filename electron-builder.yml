@@ -1,5 +1,6 @@
 appId: com.tinoco.pos.desktop
 productName: "El Mercader POS"
+artifactName: "El-Mercader-POS-Setup-${version}.${ext}"
 copyright: "© 2025 Tinoco"
 
 directories:
