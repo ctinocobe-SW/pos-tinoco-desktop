@@ -27,6 +27,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('ticket:create', payload),
   getPendingTickets: (): Promise<unknown[]> =>
     ipcRenderer.invoke('ticket:getPending'),
+  respaldarVentaEfectivo: (almacen: string, venta: unknown): Promise<void> =>
+    ipcRenderer.invoke('venta-respaldo:guardar', almacen, venta),
+  leerRespaldoVentasEfectivo: (almacen: string): Promise<{ registros: unknown[]; omitidos: number }> =>
+    ipcRenderer.invoke('venta-respaldo:listar', almacen),
 
   // Sync (Fase 2)
   syncNow: (): Promise<void> => ipcRenderer.invoke('sync:now'),

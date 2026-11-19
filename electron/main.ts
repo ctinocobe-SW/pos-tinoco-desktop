@@ -11,6 +11,7 @@ dotenv.config({ path: path.join(__dirname, '..', '.env') })
 
 import { getDb, closeDb } from './db/sqlite'
 import { registerTicketHandlers } from './ipc/tickets'
+import { registrarRespaldoVentas } from './ipc/respaldo-ventas'
 import { startSyncEngine, stopSyncEngine, registerSyncHandlers } from './sync/engine'
 
 const PORT = Number(process.env.NEXT_PORT ?? 3000)
@@ -748,6 +749,7 @@ ipcMain.handle('print:listPrinters', async () => {
 })
 
 registerTicketHandlers()
+registrarRespaldoVentas(() => mainWindow?.webContents, `http://localhost:${PORT}`)
 registerSyncHandlers()
 
 // ── Ciclo de vida ─────────────────────────────────────────────────
